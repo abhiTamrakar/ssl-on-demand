@@ -31,6 +31,9 @@
 #your Variables go here
 script=${0##/}
 exitcode=''
+WRITEFILE=0
+CONFIG=0
+DIR=0
 # functions here
 usage()
 {
@@ -78,29 +81,9 @@ getExpiry()
   local expdate=$1
   local certname=$2
   today=$(date +%s)
-  timetoexpire=$(( ($today - $expdate)/(60*60*24) ))
-  timetoexpire=${timetoexpire##*-}
+  timetoexpire=$(( ($expdate - $today)/(60*60*24) ))
 
-  case $timetoexpire in
-    0 )
-    expday0=( ${expday0[@]} "${certname}:$timetoexpire" )
-    ;;
-    [2-10] )
-    expday10=( ${expday10[@]} "${certname}:$timetoexpire" )
-    ;;
-    1[1-9]|2[0-9] )
-    expday30=( ${expday30[@]} "${certname}:$timetoexpire" )
-    ;;
-    3[1-9]|4[0-9]|5[1-9] )
-    expday60=( ${expday60[@]} "${certname}:$timetoexpire" )
-    ;;
-    6[0-9]|7[1-9]|8[0-9]|9[1-9] )
-    expday90=( ${expday90[@]} "${certname}:$timetoexpire" )
-    ;;
-    * )
-    expday300=( ${expday300[@]} "${certname}:$timetoexpire" )
-    ;;
-  esac
+  expcerts=( ${expcerts[@]} "${certname}:$timetoexpire" )
 }
 
 printExpiry()
@@ -215,9 +198,7 @@ calcEndDate
 #finally print the list
 if [[ $WRITEFILE -eq 0 ]]; then
   #statements
-  printExpiry ${expday0[@]} ${expday10[@]} ${expday30[@]} \
-  ${expday60[@]} ${expday90[@]} ${expday300[@]}
+  printExpiry ${expcerts[@]}
 else
-  printExpiry ${expday0[@]} ${expday10[@]} ${expday30[@]} \
-  ${expday60[@]} ${expday90[@]} ${expday300[@]} > $OUTFILE
+  printExpiry ${expcerts[@]} > $OUTFILE
 fi
