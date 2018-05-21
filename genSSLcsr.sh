@@ -119,7 +119,9 @@ Usage: 	$SCRIPT [options] -[cdmshx]
   [-c (common name)]
   [-d (domain name)]
   [-s (SSL certificate subject)]
-  [-m (email address)]
+  [-p (password)]
+  [-m (email address)] *(Experimental)
+  [-r (remove pasphrase) default:true]
   [-h (help)]
   [-x (optional)]
 
@@ -132,7 +134,14 @@ Usage: 	$SCRIPT [options] -[cdmshx]
   -s|   Sets the subject to be applied to the certificates.
         '/C=country/ST=state/L=locality/O=organization/OU=organizationalunit/emailAddress=email'
 
-  -m|    Sets the mailing capability to the script.
+  -p|   Sets the password for private key.
+
+  -r|   Sets the value of remove passphrase.
+        true:[default] passphrase will be removed from key.
+        false: passphrase will not be removed and key wont get printed.
+
+  -m|   Sets the mailing capability to the script.
+        (Experimental at this time and requires a lot of work)
 
   -x|   Creates the certificate request and key but do not print on screen.
         To be used when script is used just to create the key and CSR with no need
@@ -211,15 +220,24 @@ openssl req -new -key ${workdir}/${cn}.key -passin pass:$password -sha1 -nodes \
 	-subj "/C=$country/ST=$state/L=$locality/O=$organization/OU=$organizationalunit/CN=$cn/emailAddress=$email" \
 	-out ${workdir}/${cn}.csr && echo -n "[DONE]" || fatal "unable to create request"
 
-#Remove passphrase from the key. Comment the line out to keep the passphrase
-info "Removing passphrase from ${cn}.key"
-openssl rsa -in ${workdir}/${cn}.key -passin pass:$password -out ${workdir}/${cn}.insecure 2>/dev/null && echo -n "[DONE]" || fatal "unable to remove passphrase"
-
-#swap the filenames
-info "Swapping the ${cn}.key to secure"
-mv ${workdir}/${cn}.key ${workdir}/${cn}.secure && echo -n "[DONE]" || fatal "unable to perfom move"
-info "Swapping insecure key to ${cn}.key"
-mv ${workdir}/${cn}.insecure ${workdir}/${cn}.key && echo -n "[DONE]" || fatal "unable to perform move"
+if [[ "${REMOVEPASSPHRASE:-true}" = 'true' ]]; then
+  #statements
+  #Remove passphrase from the key. Comment the line out to keep the passphrase
+  info "Removing passphrase from ${cn}.key"
+  openssl rsa -in ${workdir}/${cn}.key \
+  -passin pass:$password \
+  -out ${workdir}/${cn}.insecure 2>/dev/null \
+  && echo -n "[DONE]" || fatal "unable to remove passphrase"
+  #swap the filenames
+  info "Swapping the ${cn}.key to secure"
+  mv ${workdir}/${cn}.key ${workdir}/${cn}.secure \
+  && echo -n "[DONE]" || fatal "unable to perfom move"
+  info "Swapping insecure key to ${cn}.key"
+  mv ${workdir}/${cn}.insecure ${workdir}/${cn}.key \
+  && echo -n "[DONE]" || fatal "unable to perform move"
+else
+  info "Flag '-r' is set, passphrase will not be removed."
+fi
 }
 
 printCSR()
@@ -246,7 +264,7 @@ fi
 
 #Organisational details
 
-while getopts ":c:d:s:m:hx" atype
+while getopts ":c:d:s:m:p:rhx" atype
 do
 case $atype in
 c )
@@ -259,6 +277,12 @@ d )
 s )
   SFOUND=1
   subj="$OPTARG"
+  ;;
+p )
+  password="$OPTARG"
+  ;;
+r )
+  REMOVEPASSPHRASE='false'
   ;;
 m )
   MFOUND=1
