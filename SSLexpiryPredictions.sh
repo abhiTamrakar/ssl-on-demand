@@ -5,9 +5,7 @@
 #
 # 	AUTHOR: 'Abhishek.Tamrakar'
 #
-# 	VERSION: 0.0.1
-#
-# 	COMPANY: Self
+# 	VERSION: 1.0.0
 #
 # 	EMAIL: abhishek.tamrakar08@gmail.com
 #
@@ -29,17 +27,19 @@
 ##############################################
 
 #your Variables go here
-script=${0##/}
-exitcode=''
-WRITEFILE=0
+SCRIPT=${0##/}
+EXITCODE=''
+WRITEFORMAT=table
 CONFIG=0
 DIR=0
+LOGLEVEL=info
+EXT=crt
 # functions here
 usage()
 {
 cat <<EOF
 
-  USAGE: $script -[cdewh]"
+  USAGE: $SCRIPT -[cdewh]"
 
   DESCRIPTION: This script predicts the expiring SSL certificates based on the end date.
 
@@ -49,20 +49,16 @@ cat <<EOF
 
   -d|   sets the value of directory containing the certificate files in crt or pem format.
 
-  -e|   sets the value of certificate extention, e.g crt, pem, cert.
-        crt: default
+  -e|   sets the value of certificate extention [crt, pem, cert], default: crt
 
-  -w|   sets the value for writing the script output to a file.
+  -w|   sets the value for output format of the script [table, csv, json, yaml], default: table
+
+  -l|   sets the log level [info, debug, error, warn], default: info
 
   -h|   prints this help and exit.
 
 EOF
 exit 1
-}
-
-info()
-{
-  printf '\n%s: %6s\n' "INFO" "$@"
 }
 
 error()
@@ -76,21 +72,50 @@ warn()
   printf '\n%s: %6s\n' "WARN" "$@"
 }
 
-getExpiry()
+log()
 {
-  local expdate=$1
-  local certname=$2
-  today=$(date +%s)
-  timetoexpire=$(( ($expdate - $today)/(60*60*24) ))
-
-  expcerts=( ${expcerts[@]} "${certname}:$timetoexpire" )
+  local LEVEL=$LOGLEVEL
+  local SEVERITY=$1
+  local MESSAGE=$2
+  if [[ "${LEVEL}" = "${SEVERITY}" ]]; then
+  # check if loglevel is same as severity or one of the valid log levels.
+    case $SEVERITY in
+      info|debug ) printf '\n%s: %6s\n' "${SEVERITY}" "$MESSAGE";;
+      * ) error "invalid log level $LOGLEVEL";;
+    esac
+  fi
 }
 
-printExpiry()
+getExpiry()
 {
-  local args=$#
+  local EXPDATE=$1
+  local CERTNAME=$2
+  TODAY=$(date +%s)
+  TIMETOEXPIRE=$(( ($EXPDATE - $TODAY)/(60*60*24) ))
+  log debug "${CERTNAME}.${EXT} will expire in ${TIMETOEXPIRE} days"
+
+  EXPCERTS=( ${EXPCERTS[@]} "${CERTNAME}:$TIMETOEXPIRE" )
+  log debug "Expiring certificates ${EXPCERTS[@]}"
+}
+
+printCSV()
+{
+  local ARGS=$#
   i=0
-  if [[ $args -ne 0 ]]; then
+  if [[ $ARGS -ne 0 ]]; then
+    #statements
+    printf '%s,%s,%s\n' "serial" "name" "expiry"
+    printf '%s\n' "$@"  | \
+      sort -t':' -g -k2 | \
+      awk -F: '{printf "%d,%s,%s\n", NR, $1, $2}'
+  fi
+}
+
+printTable()
+{
+  local ARGS=$#
+  i=0
+  if [[ $ARGS -ne 0 ]]; then
     #statements
     printf '%s\n' "---------------------------------------------"
     printf '%s\n' "List of expiring SSL certificates"
@@ -100,6 +125,20 @@ printExpiry()
       column -s: -t     | \
       awk '{printf "%d.\t%s\n", NR, $0}'
     printf '%s\n' "---------------------------------------------"
+  fi
+}
+
+printJSON()
+{
+  local ARGS="$#"
+  local DATA="$@"
+  if [[ $ARGS -ne 0 ]]; then
+    count=1
+    printf '%s' "{ \"items\": [ "
+      for VALUE in ${DATA}; do
+        printf '%s' "{ \"${VALUE%%:*}\": { \"days\": \"${VALUE##*:}\" } }, "
+      done| sed -r 's/(.*), /\1/'
+    printf '%s' " ] }"
   fi
 }
 
@@ -118,41 +157,45 @@ calcEndDate()
       #statements
       error "no certificate files at $TARGETDIR with extention $EXT"
     fi
-    for file in $TARGETDIR/*.${EXT:-crt}
+    for FILE in $TARGETDIR/*.${EXT}
     do
-      expdate=$($sslcmd x509 -in $file -noout -enddate)
-      expepoch=$(date -d "${expdate##*=}" +%s)
-      certificatename=${file##*/}
-      getExpiry $expepoch ${certificatename%%.*}
+      log debug "Scanning certificate ${FILE}"
+      EXPDATE=$($sslcmd x509 -in $FILE -noout -enddate)
+      log debug "Certificate ${FILE} expires on ${EXPDATE}"
+      EXPEPOCH=$(date -d "${EXPDATE##*=}" +%s)
+      CERTIFICATENAME=${FILE##*/}
+      getExpiry $EXPEPOCH ${CERTIFICATENAME%%.*}
     done
   elif [[ $CONFIG -eq 1 ]]; then
     #statements
-    while read line
+    while read LINE
     do
-      if echo "$line" | \
+      log debug "Scanning certificate for ${LINE}"
+      if echo "$LINE" | \
       egrep -q '^[a-zA-Z0-9.]+:[0-9]+|^[a-zA-Z0-9]+_.*:[0-9]+';
       then
-        expdate=$(echo | \
-        openssl s_client -connect $line 2>/dev/null | \
+        EXPDATE=$(echo | \
+        openssl s_client -connect $LINE 2>/dev/null | \
         openssl x509 -noout -enddate 2>/dev/null);
-        if [[ $expdate = '' ]]; then
+        if [[ $EXPDATE = '' ]]; then
           #statements
-          warn "[error:0906D06C] Cannot fetch certificates for $line"
+          warn "[error:0906D06C] Cannot fetch certificates for $LINE"
         else
-          expepoch=$(date -d "${expdate##*=}" +%s);
-          certificatename=${line%%:*};
-          getExpiry $expepoch ${certificatename};
+          log debug "Certificate ${LINE} expires on ${EXPDATE}"
+          EXPEPOCH=$(date -d "${EXPDATE##*=}" +%s);
+          CERTIFICATENAME=${LINE%%:*};
+          getExpiry $EXPEPOCH ${CERTIFICATENAME};
         fi
       else
-        warn "[format error] $line is not in required format!"
+        warn "[format error] $LINE is not in required format!"
       fi
     done < $CONFIGFILE
   fi
 }
 # your script goes here
-while getopts ":c:d:w:e:h" options
+while getopts ":c:d:w:e:h" OPTIONS
 do
-case $options in
+case $OPTIONS in
 c )
   CONFIG=1
   CONFIGFILE="$OPTARG"
@@ -165,7 +208,7 @@ e )
   EXT="$OPTARG"
   case $EXT in
     crt|pem|cert )
-    info "Extention check complete."
+    log info "Extention check complete."
     ;;
     * )
     error "invalid certificate extention $EXT!"
@@ -178,8 +221,10 @@ d )
   [ $TARGETDIR = '' ] && error "$TARGETDIR empty variable!"
   ;;
 w )
-  WRITEFILE=1
-  OUTFILE="$OPTARG"
+  WRITEFORMAT="$OPTARG"
+  ;;
+l )
+  LOGLEVEL="$OPTARG"
   ;;
 h )
 	usage
@@ -196,9 +241,10 @@ shift $(($OPTIND - 1))
 #
 calcEndDate
 #finally print the list
-if [[ $WRITEFILE -eq 0 ]]; then
-  #statements
-  printExpiry ${expcerts[@]}
-else
-  printExpiry ${expcerts[@]} > $OUTFILE
-fi
+case $WRITEFORMAT in
+  table ) printTable ${EXPCERTS[@]};;
+  json ) printJSON ${EXPCERTS[@]};;
+  yaml ) printTable ${EXPCERTS[@]};;
+  csv ) printCSV ${EXPCERTS[@]};;
+  * ) error "invalid format $WRITEFORMAT";;
+esac
