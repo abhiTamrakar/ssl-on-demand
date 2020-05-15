@@ -28,18 +28,23 @@
 
 #your Variables go here
 SCRIPT=${0##/}
-EXITCODE=''
 WRITEFORMAT=table
 CONFIG=0
 DIR=0
 LOGLEVEL=info
+SSLCMD=$(which openssl)
 EXT=crt
+SSLCERTIFICATEMETRICNAME=ssl_certificate_time_to_expire
+SSLCERTIFICATESCANNED=ssl_certificates_scanned_total
+SSLCERTIFICATEEXPIRED=ssl_certificates_expired_total
+SCANNED=0
+EXPIRED=0
 # functions here
 usage()
 {
 cat <<EOF
 
-  USAGE: $SCRIPT -[cdewh]"
+  USAGE: $SCRIPT -[cdewolh]"
 
   DESCRIPTION: This script predicts the expiring SSL certificates based on the end date.
 
@@ -49,9 +54,11 @@ cat <<EOF
 
   -d|   sets the value of directory containing the certificate files in crt or pem format.
 
-  -e|   sets the value of certificate extention [crt, pem, cert], default: crt
+  -e|   sets the value of certificate extention [crt, pem], default: crt
 
-  -w|   sets the value for output format of the script [table, csv, json, yaml], default: table
+  -w|   sets the value for output format of the script [table, csv, json, prometheus], default: table
+
+  -o|   write output to a file.
 
   -l|   sets the log level [info, debug, error, warn], default: info
 
@@ -86,42 +93,31 @@ log()
   fi
 }
 
-getExpiry()
-{
-  local EXPDATE=$1
-  local CERTNAME=$2
-  TODAY=$(date +%s)
-  TIMETOEXPIRE=$(( ($EXPDATE - $TODAY)/(60*60*24) ))
-  log debug "${CERTNAME}.${EXT} will expire in ${TIMETOEXPIRE} days"
-
-  EXPCERTS=( ${EXPCERTS[@]} "${CERTNAME}:$TIMETOEXPIRE" )
-  log debug "Expiring certificates ${EXPCERTS[@]}"
-}
-
 printCSV()
 {
-  local ARGS=$#
+  local ARGS=$@
   i=0
-  if [[ $ARGS -ne 0 ]]; then
+  if [[ ${#ARGS} -ne 0 ]]; then
     #statements
-    printf '%s,%s,%s\n' "serial" "name" "expiry"
-    printf '%s\n' "$@"  | \
-      sort -t':' -g -k2 | \
-      awk -F: '{printf "%d,%s,%s\n", NR, $1, $2}'
+    printf '%s,%s,%s,%s,%s\n' "filename" "commonname" "issuer" "serial" "expiry"
+    printf '%s\n' ${ARGS}  | \
+      sed 's/|/ /g;s/:/,/g' | \
+      sort -t',' -g -k5
   fi
 }
 
 printTable()
 {
-  local ARGS=$#
+  local ARGS=$@
   i=0
-  if [[ $ARGS -ne 0 ]]; then
+  if [[ ${#ARGS} -ne 0 ]]; then
     #statements
     printf '%s\n' "---------------------------------------------"
     printf '%s\n' "List of expiring SSL certificates"
     printf '%s\n' "---------------------------------------------"
-    printf '%s\n' "$@"  | \
-      sort -t':' -g -k2 | \
+    printf '%s\n' ${ARGS}  | \
+      sed 's/|/ /g' | \
+      sort -t':' -g -k5 | \
       column -s: -t     | \
       awk '{printf "%d.\t%s\n", NR, $0}'
     printf '%s\n' "---------------------------------------------"
@@ -130,24 +126,58 @@ printTable()
 
 printJSON()
 {
-  local ARGS="$#"
-  local DATA="$@"
-  if [[ $ARGS -ne 0 ]]; then
+  local ARGS=$@
+  local VALUE=''
+  if [[ ${#ARGS} -ne 0 ]]; then
     count=1
     printf '%s' "{ \"items\": [ "
-      for VALUE in ${DATA}; do
-        printf '%s' "{ \"${VALUE%%:*}\": { \"days\": \"${VALUE##*:}\" } }, "
+      for VALUE in ${ARGS}; do
+        VALUE=(${VALUE//:/ })
+        printf '%s' "{ \"${VALUE[0]}\": { \"commonname\": \"${VALUE[1]//|/ }\", \"issuer\": \"${VALUE[2]//|/ }\", \"serial\": \"${VALUE[3]}\", \"days\": ${VALUE[4]} } }, "
       done| sed -r 's/(.*), /\1/'
     printf '%s' " ] }"
   fi
 }
 
+printPrometheus()
+{
+  local ARGS="$1"
+  local SCANNEDCERTS=$2
+  local EXPIREDCERTS=$3
+  local VALUE=''
+
+  printf '%s\n' "# HELP $SSLCERTIFICATEMETRICNAME ssl certificate expiration time in days"
+  printf '%s\n' "# TYPE $SSLCERTIFICATEMETRICNAME GAUGE"
+  for VALUE in ${ARGS}; do
+    VALUE=(${VALUE//:/ })
+    printf '%s %.2f\n' "$SSLCERTIFICATEMETRICNAME{filname=\"${VALUE[0]}\",commonname=\"${VALUE[1]//|/ }\",issuer=\"${VALUE[2]//|/ }\",serial=\"${VALUE[3]}\"}" ${VALUE[4]}
+  done
+  printf '%s\n' "# HELP $SSLCERTIFICATESCANNED total ssl certificates scanned"
+  printf '%s\n' "# TYPE $SSLCERTIFICATESCANNED COUNTER"
+  printf '%s %d\n' "$SSLCERTIFICATESCANNED" "$SCANNEDCERTS"
+
+  printf '%s\n' "# HELP $SSLCERTIFICATEEXPIRED total ssl certificates expired"
+  printf '%s\n' "# TYPE $SSLCERTIFICATEEXPIRED COUNTER"
+  printf '%s %d\n' "$SSLCERTIFICATEEXPIRED" "$EXPIREDCERTS"
+}
+
+printOutput()
+{
+  local ARGS=$@
+  case $WRITEFORMAT in
+    table) printTable "${ARGS}";;
+    csv) printCSV "${ARGS}";;
+    json) printJSON "${ARGS}";;
+    prometheus) printPrometheus "${ARGS}"  $SCANNED $EXPIRED;;
+    *) error "$WRITEFORMAT - invalid or unsupported format."
+  esac
+}
+
 calcEndDate()
 {
-  sslcmd=$(which openssl)
-  if [[ x$sslcmd = x ]]; then
+  if [[ x$SSLCMD = x ]]; then
     #statements
-    error "$sslcmd command not found!"
+    error "$SSLCMD command not found!"
   fi
   # when cert dir is given
   if [[ $DIR -eq 1 ]]; then
@@ -157,14 +187,20 @@ calcEndDate()
       #statements
       error "no certificate files at $TARGETDIR with extention $EXT"
     fi
-    for FILE in $TARGETDIR/*.${EXT}
+    for FILE in $(find $TARGETDIR/ -maxdepth 2 -type f -iname "*.${EXT}")
     do
       log debug "Scanning certificate ${FILE}"
-      EXPDATE=$($sslcmd x509 -in $FILE -noout -enddate)
+      SSLINFO=($(openssl x509 -in $FILE -noout -subject -issuer -serial | \
+        sed -r 's/\s=\s/=/g;s/(.*),\s(.*)/\2/g;s/\s/|/g' | \
+        awk -F= '{print $2}'))
+      
+      log debug "${SSLINFO[*]}"
+
+      EXPDATE=$($SSLCMD x509 -in $FILE -noout -enddate)
       log debug "Certificate ${FILE} expires on ${EXPDATE}"
       EXPEPOCH=$(date -d "${EXPDATE##*=}" +%s)
       CERTIFICATENAME=${FILE##*/}
-      getExpiry $EXPEPOCH ${CERTIFICATENAME%%.*}
+      getExpiry $EXPEPOCH ${CERTIFICATENAME%%.*} "${SSLINFO[*]}"
     done
   elif [[ $CONFIG -eq 1 ]]; then
     #statements
@@ -174,6 +210,10 @@ calcEndDate()
       if echo "$LINE" | \
       egrep -q '^[a-zA-Z0-9.]+:[0-9]+|^[a-zA-Z0-9]+_.*:[0-9]+';
       then
+        SSLINFO=($(echo | openssl s_client -connect $LINE 2>/dev/null | \
+          openssl x509 -noout -subject -issuer -serial 2>/dev/null | \
+          sed -r 's/\s=\s/=/g;s/(.*),\s(.*)/\2/g' | \
+          awk -F= '{print $2}'))
         EXPDATE=$(echo | \
         openssl s_client -connect $LINE 2>/dev/null | \
         openssl x509 -noout -enddate 2>/dev/null);
@@ -184,7 +224,7 @@ calcEndDate()
           log debug "Certificate ${LINE} expires on ${EXPDATE}"
           EXPEPOCH=$(date -d "${EXPDATE##*=}" +%s);
           CERTIFICATENAME=${LINE%%:*};
-          getExpiry $EXPEPOCH ${CERTIFICATENAME};
+          getExpiry $EXPEPOCH ${CERTIFICATENAME} ${SSLINFO[@]};
         fi
       else
         warn "[format error] $LINE is not in required format!"
@@ -192,8 +232,27 @@ calcEndDate()
     done < $CONFIGFILE
   fi
 }
+
+getExpiry()
+{
+  local EXPDATE=$1
+  local CERTNAME=$2
+  local DATA=($3)
+  TODAY=$(date +%s)
+  TIMETOEXPIRE=$(( ($EXPDATE - $TODAY)/(60*60*24) ))
+  log debug "${CERTNAME}.${EXT} will expire in ${TIMETOEXPIRE} days"
+  ((SCANNED+=1))
+  
+  if [[ ${TIMETOEXPIRE} -le 0 ]]; then
+    ((EXPIRED+=1))
+  fi
+
+  EXPCERTS=( ${EXPCERTS[@]} "${CERTNAME}.${EXT}:${DATA[0]}:${DATA[1]}:${DATA[2]}:$TIMETOEXPIRE" )
+  log debug "Expiring certificates ${EXPCERTS[*]}"
+}
+
 # your script goes here
-while getopts ":c:d:w:e:h" OPTIONS
+while getopts ":c:d:w:e:l:h" OPTIONS
 do
 case $OPTIONS in
 c )
@@ -241,10 +300,4 @@ shift $(($OPTIND - 1))
 #
 calcEndDate
 #finally print the list
-case $WRITEFORMAT in
-  table ) printTable ${EXPCERTS[@]};;
-  json ) printJSON ${EXPCERTS[@]};;
-  yaml ) printTable ${EXPCERTS[@]};;
-  csv ) printCSV ${EXPCERTS[@]};;
-  * ) error "invalid format $WRITEFORMAT";;
-esac
+printOutput ${EXPCERTS[@]}
