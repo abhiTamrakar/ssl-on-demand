@@ -308,7 +308,7 @@ case $OPTIONS in
 
   \? ) usage;;
 
-  : ) fatal "Argument required !!! see \'-h\' for help";;
+  : ) error "Argument required !!! see '-h' for help";;
 esac
 done
 shift $(($OPTIND - 1))
