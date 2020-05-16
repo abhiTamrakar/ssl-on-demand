@@ -33,12 +33,15 @@ CONFIG=0
 DIR=0
 LOGLEVEL=info
 SSLCMD=$(which openssl)
+JQ=$(which jq)
 EXT=crt
+HEADER="query:commonname:issuer:serial:timetoexpire"
 SSLCERTIFICATEMETRICNAME=ssl_certificate_time_to_expire
 SSLCERTIFICATESCANNED=ssl_certificates_scanned_total
 SSLCERTIFICATEEXPIRED=ssl_certificates_expired_total
 SCANNED=0
 EXPIRED=0
+OUTFILE=''
 # functions here
 usage()
 {
@@ -46,7 +49,7 @@ cat <<EOF
 
   USAGE: $SCRIPT -[cdewolh]"
 
-  DESCRIPTION: This script predicts the expiring SSL certificates based on the end date.
+  DESCRIPTION: This script predicts and prints the expiring SSL certificates based on the end date.
 
   OPTIONS:
 
@@ -70,13 +73,13 @@ exit 1
 
 error()
 {
-  printf '\n%s: %6s\n' "ERROR" "$@"
+  >&2 printf '\n%s: %6s\n' "ERROR" "$@"
   exit 1
 }
 
 warn()
 {
-  printf '\n%s: %6s\n' "WARN" "$@"
+  >&2 printf '\n%s: %6s\n\n' "WARN" "$@"
 }
 
 log()
@@ -99,7 +102,7 @@ printCSV()
   i=0
   if [[ ${#ARGS} -ne 0 ]]; then
     #statements
-    printf '%s,%s,%s,%s,%s\n' "filename" "commonname" "issuer" "serial" "expiry"
+    printf '%s\n' $HEADER | awk -F":" 'BEGIN{OFS=","};{print $1,$2,$3,$4,$5}'
     printf '%s\n' ${ARGS}  | \
       sed 's/|/ /g;s/:/,/g' | \
       sort -t',' -g -k5
@@ -109,18 +112,19 @@ printCSV()
 printTable()
 {
   local ARGS=$@
+  local LINEBREAK="------------------------------------------------------------------------------------------"
   i=0
   if [[ ${#ARGS} -ne 0 ]]; then
     #statements
-    printf '%s\n' "---------------------------------------------"
-    printf '%s\n' "List of expiring SSL certificates"
-    printf '%s\n' "---------------------------------------------"
-    printf '%s\n' ${ARGS}  | \
+    printf '%s\n' $LINEBREAK
+    printf '%70s\n' "List of expiring SSL certificates"
+    printf '%s\n' $LINEBREAK
+    printf '%s\n%s\n' ${HEADER^^} ${ARGS}  | \
       sed 's/|/ /g' | \
       sort -t':' -g -k5 | \
       column -s: -t     | \
-      awk '{printf "%d.\t%s\n", NR, $0}'
-    printf '%s\n' "---------------------------------------------"
+      awk '{printf "%s\n", $0}'
+    printf '%s\n' $LINEBREAK
   fi
 }
 
@@ -150,15 +154,16 @@ printPrometheus()
   printf '%s\n' "# TYPE $SSLCERTIFICATEMETRICNAME GAUGE"
   for VALUE in ${ARGS}; do
     VALUE=(${VALUE//:/ })
-    printf '%s %.2f\n' "$SSLCERTIFICATEMETRICNAME{filname=\"${VALUE[0]}\",commonname=\"${VALUE[1]//|/ }\",issuer=\"${VALUE[2]//|/ }\",serial=\"${VALUE[3]}\"}" ${VALUE[4]}
+    # ignore putting filename in prometheus metrics
+    printf '%s %.2f\n' "$SSLCERTIFICATEMETRICNAME{commonname=\"${VALUE[1]//|/ }\",issuer=\"${VALUE[2]//|/ }\",serial=\"${VALUE[3]}\"}" ${VALUE[4]}
   done
   printf '%s\n' "# HELP $SSLCERTIFICATESCANNED total ssl certificates scanned"
   printf '%s\n' "# TYPE $SSLCERTIFICATESCANNED COUNTER"
-  printf '%s %d\n' "$SSLCERTIFICATESCANNED" "$SCANNEDCERTS"
+  printf '%s %d\n' "$SSLCERTIFICATESCANNED" $SCANNEDCERTS
 
   printf '%s\n' "# HELP $SSLCERTIFICATEEXPIRED total ssl certificates expired"
   printf '%s\n' "# TYPE $SSLCERTIFICATEEXPIRED COUNTER"
-  printf '%s %d\n' "$SSLCERTIFICATEEXPIRED" "$EXPIREDCERTS"
+  printf '%s %d\n' "$SSLCERTIFICATEEXPIRED" $EXPIREDCERTS
 }
 
 printOutput()
@@ -167,8 +172,13 @@ printOutput()
   case $WRITEFORMAT in
     table) printTable "${ARGS}";;
     csv) printCSV "${ARGS}";;
-    json) printJSON "${ARGS}";;
-    prometheus) printPrometheus "${ARGS}"  $SCANNED $EXPIRED;;
+    json) if [[ "x${JQ}" = "x" ]]; then
+        warn "to pretty print json, install jq"
+        printJSON "${ARGS}"
+      else
+        printJSON "${ARGS}"|${JQ}
+      fi;;
+    prometheus) EXT=prom; printPrometheus "${ARGS}"  $SCANNED $EXPIRED;;
     *) error "$WRITEFORMAT - invalid or unsupported format."
   esac
 }
@@ -182,25 +192,31 @@ calcEndDate()
   # when cert dir is given
   if [[ $DIR -eq 1 ]]; then
     #statements
-    checkcertexists=$(ls -A $TARGETDIR| egrep "*.$EXT$")
-    if [[ -z ${checkcertexists} ]]; then
-      #statements
-      error "no certificate files at $TARGETDIR with extention $EXT"
-    fi
-    for FILE in $(find $TARGETDIR/ -maxdepth 2 -type f -iname "*.${EXT}")
+    for CERTDIR in ${TARGETDIR[@]}
     do
-      log debug "Scanning certificate ${FILE}"
-      SSLINFO=($(openssl x509 -in $FILE -noout -subject -issuer -serial | \
-        sed -r 's/\s=\s/=/g;s/(.*),\s(.*)/\2/g;s/\s/|/g' | \
-        awk -F= '{print $2}'))
-      
-      log debug "${SSLINFO[*]}"
+      ISCERTSEXISTS=$(ls -A $CERTDIR| egrep "*.$EXT$")
+      if [[ -z ${ISCERTSEXISTS} ]]; then
+        #statements
+        warn "no certificate files at $CERTDIR with extention $EXT"
+      fi
+      for FILE in $(find $CERTDIR/ -maxdepth 2 -type f -iname "*.${EXT}")
+      do
+        log debug "Scanning certificate ${FILE}"
 
-      EXPDATE=$($SSLCMD x509 -in $FILE -noout -enddate)
-      log debug "Certificate ${FILE} expires on ${EXPDATE}"
-      EXPEPOCH=$(date -d "${EXPDATE##*=}" +%s)
-      CERTIFICATENAME=${FILE##*/}
-      getExpiry $EXPEPOCH ${CERTIFICATENAME%%.*} "${SSLINFO[*]}"
+        SSLINFO=($(openssl x509 -in $FILE -noout -subject -issuer -serial | \
+          sed -r 's/\s=\s/=/g;s/(.*),\s(.*)/\2/g;s/\s/|/g' | \
+          awk -F= '{print $NF}'))
+        
+        log debug "processed certificate information - ${SSLINFO[*]}"
+
+        EXPDATE=$($SSLCMD x509 -in $FILE -noout -enddate)
+        
+        log debug "Certificate ${FILE} expires on ${EXPDATE}"
+        
+        EXPEPOCH=$(date -d "${EXPDATE##*=}" +%s)
+        CERTIFICATENAME=${FILE##*/}
+        getExpiry $EXPEPOCH ${CERTIFICATENAME%%.*} "${SSLINFO[*]}"
+      done
     done
   elif [[ $CONFIG -eq 1 ]]; then
     #statements
@@ -212,8 +228,11 @@ calcEndDate()
       then
         SSLINFO=($(echo | openssl s_client -connect $LINE 2>/dev/null | \
           openssl x509 -noout -subject -issuer -serial 2>/dev/null | \
-          sed -r 's/\s=\s/=/g;s/(.*),\s(.*)/\2/g' | \
-          awk -F= '{print $2}'))
+          sed -r 's/\s=\s/=/g;s/(.*),\s(.*)/\2/g;s/\s/|/g' | \
+          awk -F= '{print $NF}'))
+
+        log debug "processed certificate information - ${SSLINFO[*]}"
+
         EXPDATE=$(echo | \
         openssl s_client -connect $LINE 2>/dev/null | \
         openssl x509 -noout -enddate 2>/dev/null);
@@ -222,9 +241,10 @@ calcEndDate()
           warn "[error:0906D06C] Cannot fetch certificates for $LINE"
         else
           log debug "Certificate ${LINE} expires on ${EXPDATE}"
+        
           EXPEPOCH=$(date -d "${EXPDATE##*=}" +%s);
           CERTIFICATENAME=${LINE%%:*};
-          getExpiry $EXPEPOCH ${CERTIFICATENAME} ${SSLINFO[@]};
+          getExpiry $EXPEPOCH ${CERTIFICATENAME} "${SSLINFO[*]}"
         fi
       else
         warn "[format error] $LINE is not in required format!"
@@ -247,57 +267,58 @@ getExpiry()
     ((EXPIRED+=1))
   fi
 
-  EXPCERTS=( ${EXPCERTS[@]} "${CERTNAME}.${EXT}:${DATA[0]}:${DATA[1]}:${DATA[2]}:$TIMETOEXPIRE" )
-  log debug "Expiring certificates ${EXPCERTS[*]}"
+  log debug "extracted ssl information - ${DATA[*]}"
+
+  EXPCERTS=( ${EXPCERTS[@]} "${CERTNAME}:${DATA[0]}:${DATA[1]}:${DATA[2]}:$TIMETOEXPIRE" )
+  log debug "Expiring certificates - ${EXPCERTS[*]}"
 }
 
 # your script goes here
-while getopts ":c:d:w:e:l:h" OPTIONS
+while getopts ":c:d:w:o:e:l:h" OPTIONS
 do
 case $OPTIONS in
-c )
-  CONFIG=1
-  CONFIGFILE="$OPTARG"
-  if [[ ! -e $CONFIGFILE ]] || [[ ! -s $CONFIGFILE ]]; then
-    #statements
-    error "$CONFIGFILE does not exist or empty!"
-  fi
-	;;
-e )
-  EXT="$OPTARG"
-  case $EXT in
-    crt|pem|cert )
-    log info "Extention check complete."
-    ;;
-    * )
-    error "invalid certificate extention $EXT!"
-    ;;
-  esac
-  ;;
-d )
-  DIR=1
-  TARGETDIR="$OPTARG"
-  [ $TARGETDIR = '' ] && error "$TARGETDIR empty variable!"
-  ;;
-w )
-  WRITEFORMAT="$OPTARG"
-  ;;
-l )
-  LOGLEVEL="$OPTARG"
-  ;;
-h )
-	usage
-	;;
-\? )
-	usage
-	;;
-: )
-	fatal "Argument required !!! see \'-h\' for help"
-	;;
+  c ) CONFIG=1
+      CONFIGFILE="$OPTARG"
+      if [[ ! -e $CONFIGFILE ]] || [[ ! -s $CONFIGFILE ]]; then
+        #statements
+        error "$CONFIGFILE does not exist or empty!"
+      fi;;
+
+  e ) EXT="$OPTARG"
+      case $EXT in
+        crt|pem|cert )
+        log info "Extention check complete."
+        ;;
+        * )
+        error "invalid certificate extention $EXT!"
+        ;;
+      esac;;
+
+  d ) DIR=1
+      TARGETDIR="${OPTARG//,/ }"
+      [[ ${#TARGETDIR[@]} -eq 0 ]] && error "$TARGETDIR empty variable!";;
+
+  w ) WRITEFORMAT="$OPTARG";;
+
+  o ) OUTFILE="$OPTARG";;
+
+  l ) LOGLEVEL="$OPTARG";;
+
+  h ) usage;;
+
+  \? ) usage;;
+
+  : ) fatal "Argument required !!! see \'-h\' for help";;
 esac
 done
 shift $(($OPTIND - 1))
 #
 calcEndDate
 #finally print the list
-printOutput ${EXPCERTS[@]}
+if [[ ${OUTFILE} = "" ]]; then
+  printOutput ${EXPCERTS[@]}
+else
+  printOutput ${EXPCERTS[@]} > ${OUTFILE}
+  # handle permissions for the files paret directory
+  chmod -R 755 ${OUTFILE%/*}
+fi
