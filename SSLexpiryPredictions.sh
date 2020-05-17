@@ -35,7 +35,7 @@ LOGLEVEL=info
 SSLCMD=$(which openssl)
 JQ=$(which jq)
 EXT=crt
-HEADER="query:commonname:issuer:serial:timetoexpire"
+HEADER="query;commonname;issuer;serial;timetoexpire"
 SSLCERTIFICATEMETRICNAME=ssl_certificate_time_to_expire
 SSLCERTIFICATESCANNED=ssl_certificates_scanned_total
 SSLCERTIFICATEEXPIRED=ssl_certificates_expired_total
@@ -102,9 +102,9 @@ printCSV()
   i=0
   if [[ ${#ARGS} -ne 0 ]]; then
     #statements
-    printf '%s\n' $HEADER | awk -F":" 'BEGIN{OFS=","};{print $1,$2,$3,$4,$5}'
+    printf '%s\n' $HEADER | awk -F";" 'BEGIN{OFS=","};{print $1,$2,$3,$4,$5}'
     printf '%s\n' ${ARGS}  | \
-      sed 's/|/ /g;s/:/,/g' | \
+      sed 's/|/ /g;s/\;/,/g' | \
       sort -t',' -g -k5
   fi
 }
@@ -121,8 +121,8 @@ printTable()
     printf '%s\n' $LINEBREAK
     printf '%s\n%s\n' ${HEADER^^} ${ARGS}  | \
       sed 's/|/ /g' | \
-      sort -t':' -g -k5 | \
-      column -s: -t     | \
+      sort -t';' -g -k5 | \
+      column -s';' -t     | \
       awk '{printf "%s\n", $0}'
     printf '%s\n' $LINEBREAK
   fi
@@ -136,7 +136,7 @@ printJSON()
     count=1
     printf '%s' "{ \"items\": [ "
       for VALUE in ${ARGS}; do
-        VALUE=(${VALUE//:/ })
+        VALUE=(${VALUE//;/ })
         printf '%s' "{ \"${VALUE[0]}\": { \"commonname\": \"${VALUE[1]//|/ }\", \"issuer\": \"${VALUE[2]//|/ }\", \"serial\": \"${VALUE[3]}\", \"days\": ${VALUE[4]} } }, "
       done| sed -r 's/(.*), /\1/'
     printf '%s' " ] }"
@@ -153,7 +153,7 @@ printPrometheus()
   printf '%s\n' "# HELP $SSLCERTIFICATEMETRICNAME ssl certificate expiration time in days"
   printf '%s\n' "# TYPE $SSLCERTIFICATEMETRICNAME GAUGE"
   for VALUE in ${ARGS}; do
-    VALUE=(${VALUE//:/ })
+    VALUE=(${VALUE//;/ })
     # ignore putting filename in prometheus metrics
     printf '%s %.2f\n' "$SSLCERTIFICATEMETRICNAME{commonname=\"${VALUE[1]//|/ }\",issuer=\"${VALUE[2]//|/ }\",serial=\"${VALUE[3]}\"}" ${VALUE[4]}
   done
@@ -269,7 +269,7 @@ getExpiry()
 
   log debug "extracted ssl information - ${DATA[*]}"
 
-  EXPCERTS=( ${EXPCERTS[@]} "${CERTNAME}:${DATA[0]}:${DATA[1]}:${DATA[2]}:$TIMETOEXPIRE" )
+  EXPCERTS=( ${EXPCERTS[@]} "${CERTNAME};${DATA[0]};${DATA[1]};${DATA[2]};$TIMETOEXPIRE" )
   log debug "Expiring certificates - ${EXPCERTS[*]}"
 }
 
